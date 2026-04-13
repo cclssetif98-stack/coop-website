@@ -1,85 +1,83 @@
 const express = require("express");
 const session = require("express-session");
-const sqlite3 = require("sqlite3").verbose();
-const multer = require("multer");
-const xlsx = require("xlsx");
-const path = require("path");
+const Database = require("better-sqlite3");
+const cors = require("cors");
 
 const app = express();
-const db = new sqlite3.Database("database.db");
+const PORT = process.env.PORT || 3000;
+
+// ================= DB =================
+const db = new Database("smartgov.db");
 
 // ================= MIDDLEWARE =================
-app.use(express.urlencoded({ extended: true }));
+app.use(cors());
 app.use(express.json());
-app.use(express.static("public"));
+app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
-    secret: "company-erp-secret",
+    secret: "SMART-GOV-ERP-2026",
     resave: false,
     saveUninitialized: false
 }));
 
-const upload = multer({ dest: "uploads/" });
+// ================= INIT DB =================
+db.exec(`
+CREATE TABLE IF NOT EXISTS farmers (
+    codpart TEXT PRIMARY KEY,
+    name TEXT,
+    region TEXT,
+    paid REAL,
+    debt REAL
+);
 
-// ================= DATABASE =================
-db.serialize(() => {
-
-    db.run(`CREATE TABLE IF NOT EXISTS farmers (
-        codpart TEXT PRIMARY KEY,
-        name TEXT,
-        paid REAL DEFAULT 0,
-        debt REAL DEFAULT 0,
-        status TEXT DEFAULT 'نشط'
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS movements (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        codpart TEXT,
-        type TEXT,
-        product TEXT,
-        quantity REAL,
-        year TEXT
-    )`);
-});
+CREATE TABLE IF NOT EXISTS movements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    codpart TEXT,
+    product TEXT,
+    quantity REAL,
+    year TEXT,
+    region TEXT
+);
+`);
 
 // ================= SAMPLE DATA =================
-db.get("SELECT * FROM farmers WHERE codpart='123'", (err,row)=>{
-    if(!row){
-        db.run("INSERT INTO farmers VALUES ('123','أحمد بن علي',50000,12000,'نشط')");
-        db.run("INSERT INTO farmers VALUES ('124','محمد براهيم',30000,0,'نشط')");
+const check = db.prepare("SELECT * FROM farmers WHERE codpart=?").get("123");
 
-        db.run("INSERT INTO movements VALUES (NULL,'123','Collecte','Blé',1000,'2024')");
-        db.run("INSERT INTO movements VALUES (NULL,'123','Collecte','Orge',500,'2025')");
-        db.run("INSERT INTO movements VALUES (NULL,'124','Collecte','Blé',800,'2024')");
-    }
-});
+if (!check) {
+    db.prepare("INSERT INTO farmers VALUES (?,?,?,?,?)")
+      .run("123","أحمد بن علي","Setif",50000,12000);
 
-// ================= HOME =================
-app.get("/", (req,res)=>{
-    res.send(`
-    <div style="text-align:center;font-family:Arial;margin-top:80px">
-        <h1>🏢 ERP COMPANY - بوابة الفلاح</h1>
+    db.prepare("INSERT INTO farmers VALUES (?,?,?,?,?)")
+      .run("124","محمد براهيم","Algiers",30000,0);
 
-        <form method="POST" action="/login">
-            <input name="codpart" placeholder="COD PART" style="padding:10px;width:220px">
-            <br><br>
-            <button style="padding:10px 25px">دخول النظام</button>
-        </form>
+    db.prepare("INSERT INTO movements VALUES (NULL,?,?,?,?,?)")
+      .run("123","Blé",1000,"2024","Setif");
 
-        <br>
-        <a href="/admin">🧑‍💼 لوحة الإدارة</a>
-    </div>
-    `);
-});
+    db.prepare("INSERT INTO movements VALUES (NULL,?,?,?,?,?)")
+      .run("123","Orge",600,"2025","Setif");
+
+    db.prepare("INSERT INTO movements VALUES (NULL,?,?,?,?,?)")
+      .run("124","Blé",400,"2026","Algiers");
+}
+
+// ================= AI =================
+function aiPredict(arr){
+    if(arr.length === 0) return 0;
+    let sum = arr.reduce((a,b)=>a+b,0);
+    let avg = sum / arr.length;
+    return Math.round(avg * 1.12);
+}
 
 // ================= LOGIN =================
 app.post("/login",(req,res)=>{
-    db.get("SELECT * FROM farmers WHERE codpart=?",[req.body.codpart],(err,f)=>{
-        if(!f) return res.send("❌ غير موجود");
+    const {codpart} = req.body;
 
-        req.session.user = f;
-        res.redirect("/dashboard");
-    });
+    const farmer = db.prepare("SELECT * FROM farmers WHERE codpart=?").get(codpart);
+
+    if(!farmer) return res.send("❌ Not Found");
+
+    req.session.user = farmer;
+    res.redirect("/dashboard");
 });
 
 // ================= AUTH =================
@@ -88,216 +86,124 @@ function auth(req,res,next){
     else res.redirect("/");
 }
 
-// ================= DASHBOARD COMPANY =================
-app.get("/dashboard", auth, (req,res)=>{
+// ================= DASHBOARD =================
+app.get("/dashboard",auth,(req,res)=>{
 
     const u = req.session.user;
 
-    db.all("SELECT * FROM movements WHERE codpart=?",[u.codpart],(err,data)=>{
+    const movements = db.prepare("SELECT * FROM movements WHERE codpart=?").all(u.codpart);
 
-        let total = 0;
-        let chart = {blé:0, orge:0};
+    let total = 0;
+    let byYear = {2024:0,2025:0,2026:0};
 
-        data.forEach(d=>{
-            total += Number(d.quantity||0);
-            if(d.product.includes("Blé")) chart.blé += Number(d.quantity||0);
-            if(d.product.includes("Orge")) chart.orge += Number(d.quantity||0);
-        });
+    movements.forEach(d=>{
+        total += d.quantity;
+        byYear[d.year] = (byYear[d.year]||0) + d.quantity;
+    });
 
-        res.send(`
+    let prediction = aiPredict(Object.values(byYear));
+
+    res.send(`
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<title>ERP COMPANY</title>
-
+<title>SMART GOV</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <style>
-body{margin:0;font-family:Arial;background:#0a0f1c;color:white}
-
-.header{
-    background:#16a34a;
-    padding:20px;
-    text-align:center;
-    font-size:22px;
-}
-
-.grid{
-    text-align:center;
-    margin-top:20px;
-}
-
-.card{
-    display:inline-block;
-    background:#1f2937;
-    padding:15px;
-    margin:10px;
-    width:170px;
-    border-radius:10px;
-}
-
-table{
-    width:90%;
-    margin:auto;
-    margin-top:20px;
-    background:white;
-    color:black;
-    border-collapse:collapse;
-}
-
-th,td{
-    padding:10px;
-    border:1px solid #ddd;
-}
-
-input,select{
-    padding:10px;
-    margin:10px;
-}
+body{margin:0;font-family:Arial;background:#0b1020;color:white}
+header{background:#2563eb;padding:15px;text-align:center}
+.card{display:inline-block;background:#111827;margin:10px;padding:15px;border-radius:10px;width:160px}
+.container{text-align:center}
 </style>
-
 </head>
 
 <body>
 
-<div class="header">
-🏢 ERP COMPANY SYSTEM
+<header>🏛️ SMART GOV ERP</header>
+
+<h2 style="text-align:center">${u.name} - ${u.region}</h2>
+
+<div class="container">
+<div class="card">💰 Paid<br>${u.paid}</div>
+<div class="card">💸 Debt<br>${u.debt}</div>
+<div class="card">📦 Total<br>${total}</div>
+<div class="card">🧠 AI<br>${prediction}</div>
 </div>
 
-<h2 style="text-align:center">👨‍🌾 ${u.name}</h2>
-
-<div class="grid">
-<div class="card">💰 مدفوع<br>${u.paid}</div>
-<div class="card">💸 دين<br>${u.debt}</div>
-<div class="card">🌾 مجموع<br>${total}</div>
-</div>
-
-<div style="text-align:center">
-<select onchange="location='/dashboard?year='+this.value">
-<option value="ALL">كل السنوات</option>
-<option value="2024">2024</option>
-<option value="2025">2025</option>
-<option value="2026">2026</option>
-</select>
-</div>
-
-<div style="width:400px;margin:auto">
-<canvas id="c"></canvas>
-</div>
-
-<table>
-<tr>
-<th>Type</th>
-<th>Product</th>
-<th>Quantity</th>
-<th>Year</th>
-</tr>
-
-${data.map(r=>`
-<tr>
-<td>${r.type}</td>
-<td>${r.product}</td>
-<td>${r.quantity}</td>
-<td>${r.year}</td>
-</tr>
-`).join("")}
-
-</table>
+<canvas id="chart" style="max-width:500px;margin:auto;display:block"></canvas>
 
 <script>
-new Chart(document.getElementById("c"),{
-    type:"bar",
-    data:{
-        labels:["Blé","Orge"],
-        datasets:[{
-            label:"Production",
-            data:[${chart.blé},${chart.orge}],
-            backgroundColor:["#22c55e","#3b82f6"]
-        }]
-    }
+new Chart(document.getElementById("chart"),{
+type:"line",
+data:{
+labels:["2024","2025","2026"],
+datasets:[{
+label:"Production",
+data:[${byYear[2024]},${byYear[2025]},${byYear[2026]}],
+borderColor:"#22c55e"
+}]
+}
 });
 </script>
 
-<br><br>
+<br>
 <div style="text-align:center">
-<a href="/logout" style="color:red">🚪 خروج</a>
+<a href="/logout" style="color:red">Logout</a>
 </div>
 
 </body>
 </html>
-        `);
-    });
-});
-
-// ================= ADMIN =================
-app.get("/admin",(req,res)=>{
-    res.send(`
-    <div style="text-align:center;font-family:Arial">
-        <h2>🧑‍💼 COMPANY ADMIN PANEL</h2>
-
-        <h3>📥 Farmers Excel</h3>
-        <form action="/import-farmers" method="POST" enctype="multipart/form-data">
-            <input type="file" name="file">
-            <button>Upload</button>
-        </form>
-
-        <h3>📥 Movements Excel</h3>
-        <form action="/import-movements" method="POST" enctype="multipart/form-data">
-            <input type="file" name="file">
-            <button>Upload</button>
-        </form>
-
-        <br>
-        <a href="/">Home</a>
-    </div>
     `);
 });
 
-// ================= IMPORT FARMERS =================
-app.post("/import-farmers", upload.single("file"), (req,res)=>{
-    const wb = xlsx.readFile(req.file.path);
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    const data = xlsx.utils.sheet_to_json(sheet);
+// ================= API MAP =================
+app.get("/api/map",(req,res)=>{
 
-    data.forEach(r=>{
-        db.run("INSERT OR REPLACE INTO farmers VALUES (?,?,?,?,?)",
-        [r.Codepart, r.Nompart, 0, 0, "نشط"]);
-    });
+    const rows = db.prepare(`
+        SELECT region, SUM(quantity) as total
+        FROM movements
+        GROUP BY region
+    `).all();
 
-    res.send("✅ Farmers OK");
+    const map = rows.map(r=>({
+        region:r.region,
+        value:r.total,
+        level: r.total>1000?"HIGH":r.total>500?"MEDIUM":"LOW"
+    }));
+
+    res.json(map);
 });
 
-// ================= IMPORT MOVEMENTS =================
-app.post("/import-movements", upload.single("file"), (req,res)=>{
-    const wb = xlsx.readFile(req.file.path);
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    const data = xlsx.utils.sheet_to_json(sheet);
+// ================= NATIONAL =================
+app.get("/api/national",(req,res)=>{
 
-    data.forEach(r=>{
-        db.run("INSERT INTO movements VALUES (NULL,?,?,?,?,?)",
-        [r.Codepart, r.Type, r.Produit, r.Quantite, r.Annee]);
-    });
+    const data = db.prepare("SELECT * FROM movements").all();
 
-    res.send("✅ Movements OK");
-});
+    let total = data.reduce((a,b)=>a+b.quantity,0);
+    let forecast = aiPredict(data.map(d=>d.quantity));
 
-// ================= API (MOBILE FUTURE) =================
-app.get("/api/:cod",(req,res)=>{
-    db.get("SELECT * FROM farmers WHERE codpart=?",[req.params.cod],(e,f)=>{
-        db.all("SELECT * FROM movements WHERE codpart=?",[req.params.cod],(e2,m)=>{
-            res.json({farmer:f, movements:m});
-        });
+    res.json({
+        total,
+        forecast,
+        status:"SMART GOV OK"
     });
 });
 
-// ================= LOGOUT =================
-app.get("/logout",(req,res)=>{
-    req.session.destroy();
-    res.redirect("/");
+// ================= HOME =================
+app.get("/",(req,res)=>{
+    res.send(`
+    <h1 style="text-align:center;margin-top:80px">🏛️ SMART GOV</h1>
+
+    <form method="POST" action="/login" style="text-align:center">
+        <input name="codpart" placeholder="COD PART">
+        <button>Login</button>
+    </form>
+    `);
 });
 
 // ================= START =================
-app.listen(3000,()=>{
-    console.log("🏢 COMPANY ERP RUNNING http://localhost:3000");
+app.listen(PORT,()=>{
+    console.log("🏛️ SMART GOV RUNNING ON " + PORT);
 });
